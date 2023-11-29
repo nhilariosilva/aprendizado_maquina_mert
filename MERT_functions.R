@@ -125,7 +125,7 @@ generate_sample <- function(N, Xi, beta, Zi, D, sigma2){
     ))
 }
 
-train_MERT <- function(df, fixed_effects_form, Ys, Xis, Zis, e, verbose = TRUE, max_iter = 200){    
+train_MERT <- function(df, fixed_effects_form, Ys, Xis, Zis, e, response_name, verbose = TRUE, max_iter = 200){    
     N <- length(Xis)
     count <- 0
     q <- ncol(Zis[[1]])
@@ -166,12 +166,15 @@ train_MERT <- function(df, fixed_effects_form, Ys, Xis, Zis, e, verbose = TRUE, 
         fit_rpart <- rpart(fixed_effects_form, data = df_star)
         f_y_hat <- predict(fit_rpart)
         
-        # return(f_y_hat)
-        
         # Once predicted by the rpart, segment the responses by subject again
         df_star <- cbind(df_star, f_y_hat)
         
+        # return(df_star)
+        
+        # Format the predicted responses on the subject wise form
         f_y_hat <- (df_star %>% group_by(id) %>% summarise(f_y_hat = list(f_y_hat)))$f_y_hat
+        
+        # return(f_y_hat)
         
         # ------------------ (iii)
         Vi_hat <- list()
@@ -238,7 +241,7 @@ train_MERT <- function(df, fixed_effects_form, Ys, Xis, Zis, e, verbose = TRUE, 
             
             G <- Yi - f_hat - Zi%*%bi
             
-            t(G) %*% G / sigma2 + t(bi) %*% solve(D_hat) %*% bi + log(det(D_hat)) + ni*log(sigma2_hat)
+            t(G) %*% G / sigma2_hat + t(bi) %*% solve(D_hat) %*% bi + log(det(D_hat)) + ni*log(sigma2_hat)
         }) %>% unlist %>% sum
 
         if(abs(aux_GLL - GLLs[length(GLLs)]) <= e | r >= max_iter){
@@ -249,8 +252,11 @@ train_MERT <- function(df, fixed_effects_form, Ys, Xis, Zis, e, verbose = TRUE, 
     }
     
     if(verbose){
-        cat("Converged after", r, "iterations.")
+        cat("Converged after", r, "iterations. Difference in GLLs of", abs(GLLs[length(GLLs)] - GLLs[length(GLLs)-1]))
     }
+    
+    ids <- unique(df$id)
+    names(bi_hat) <- ids
     
     return(list(
         "f" = fit_rpart,
@@ -273,11 +279,11 @@ predict_MERT <- function(fit, Xis, Zis, ids = NULL){
         fixed_part <- predict(fit$f, newdata = Xi)
         
         # If the subject id is not given, assume its a new individual, returning just the population mean
-        if(is.null(id)){
+        if(is.null(id) | !(id %in% names(fit$bi))){
             return( fixed_part )
         }
         
-        random_part <- as.matrix(Zi) %*% as.matrix(fit$bi[[id]]) %>% as.vector
+        random_part <- as.matrix(Zi) %*% as.matrix(fit$bi[[as.character(id)]]) %>% as.vector
         return( fixed_part + random_part )
     }
     
@@ -285,12 +291,12 @@ predict_MERT <- function(fit, Xis, Zis, ids = NULL){
     if( any(class(Xis) != "list") ){
         return( predict_single(fit, Xis, Zis, ids) )
     }else{
-        pred <- c()
+        pred <- list()
         for(i in 1:length(Xis)){
             id <- ids[i]
             Xi <- Xis[[i]]
             Zi <- Zis[[i]]
-            pred[i] <- predict_single(fit, Xi, Zi, id)
+            pred[[i]] <- predict_single(fit, Xi, Zi, id)
         }
         return(pred)
     }
