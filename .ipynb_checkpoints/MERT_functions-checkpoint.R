@@ -4,6 +4,8 @@ suppressMessages( library(tidyr) ) # Manipulações de funções
 
 # Regression trees
 suppressMessages( library(rpart) )
+# Random forests
+suppressMessages( library(ranger) )
 
 # Pacotes para a construção de gráficos
 suppressMessages( library(ggplot2) )
@@ -277,6 +279,181 @@ predict_MERT <- function(fit, Xis, Zis, ids = NULL){
         Zi <- as.data.frame(Zi)
         
         fixed_part <- predict(fit$f, newdata = Xi)
+        
+        # If the subject id is not given, assume its a new individual, returning just the population mean
+        if(is.null(id) | !(id %in% names(fit$bi))){
+            return( fixed_part )
+        }
+        
+        random_part <- as.matrix(Zi) %*% as.matrix(fit$bi[[as.character(id)]]) %>% as.vector
+        return( fixed_part + random_part )
+    }
+    
+    # Check if it's a single prediction or a list of predictions to be made
+    if( any(class(Xis) != "list") ){
+        return( predict_single(fit, Xis, Zis, ids) )
+    }else{
+        pred <- list()
+        for(i in 1:length(Xis)){
+            id <- ids[i]
+            Xi <- Xis[[i]]
+            Zi <- Zis[[i]]
+            pred[[i]] <- predict_single(fit, Xi, Zi, id)
+        }
+        return(pred)
+    }
+}
+
+train_MERF <- function(df, fixed_effects_form, Ys, Xis, Zis, e, response_name, verbose = TRUE, max_iter = 200){    
+    N <- length(Xis)
+    count <- 0
+    q <- ncol(Zis[[1]])
+    
+    # ------------------ Step 0 ------------------
+    r <- 0
+    bi_hat <- rep(list(matrix(rep(0, q))), N)
+    sigma2_hat <- 1
+    D_hat <- diag(q)
+    
+    # Stop criterion
+    GLLs <- c(0)
+    
+    converged <- FALSE
+    while(!converged){
+        
+        r <- r + 1
+        
+        # ------------------ Step 1 ------------------
+        
+        # Recover the vectors Yi* for all subjects and join them in a single big vector
+        
+        # ------------------ (i)
+        Y_star <- lapply(1:N, function(i){
+            Yi <- Ys[[i]]
+            Zi <- Zis[[i]]
+            bi <- bi_hat[[i]]
+            
+            Yi - Zi %*% bi
+        })
+        Y_star <- Reduce(rbind, Y_star)
+        
+        df_star <- df
+        df_star$Y <- Y_star[,1]
+        
+        # ------------------ (ii)
+        # Fit and obtain the f_hat values for all individuals
+        fit_rpart <- ranger(fixed_effects_form, data = df_star, num.trees = 500)
+        f_y_hat <- predict(fit_rpart, df_star)$predictions
+        
+        # Once predicted by the rpart, segment the responses by subject again
+        df_star <- cbind(df_star, f_y_hat)
+        
+        # return(df_star)
+        
+        # Format the predicted responses on the subject wise form
+        f_y_hat <- (df_star %>% group_by(id) %>% summarise(f_y_hat = list(f_y_hat)))$f_y_hat
+        
+        # return(f_y_hat)
+        
+        # ------------------ (iii)
+        Vi_hat <- list()
+        Vi_hat_inv <- list()
+        for(i in 1:N){
+            Yi <- Ys[[i]]
+            f_hat <- f_y_hat[[i]]
+            
+            Zi <- Zis[[i]]
+            ni <- nrow(Zi)
+            
+            # Update estimate the covariances matrix of the response variable
+            Vi <- Zi %*% D_hat %*% t(Zi) + sigma2_hat * diag(ni)
+            Vi_hat[[i]] <- Vi
+            # Obtain the inverses of the matrices Vi for further calculations
+            Vi_inv <- solve(Vi)
+            Vi_hat_inv[[i]] <- Vi_inv
+            
+            # Update estimate the random effects
+            bi_hat[[i]] <- D_hat %*% t(Zi) %*% Vi_inv %*% (Yi - f_hat)
+        }
+        
+        # ------------------ Step 2 ------------------
+        
+        sigma2_hat <- (lapply(1:N, function(i){
+            Yi <- Ys[[i]]
+            f_hat <- f_y_hat[[i]]
+            
+            Zi <- Zis[[i]]
+            ni <- nrow(Zi)
+            
+            Vi_inv <- Vi_hat_inv[[i]]
+            bi <- bi_hat[[i]]
+            
+            # Update estimate the residual error epsilon
+            epsilon_i <- Yi - f_hat - Zi %*% bi
+            
+            # Update estimate of sigma2
+            t(epsilon_i) %*% epsilon_i + sigma2_hat * (ni - sigma2_hat*sum(diag(Vi_inv)))
+        }) %>% unlist %>% sum) / nrow(df)
+        
+        D_hat <- lapply(1:N, function(i){
+            Yi <- Ys[[i]]
+            Zi <- Zis[[i]]
+            ni <- nrow(Zi)
+            
+            bi <- bi_hat[[i]]
+            Vi_inv <- Vi_hat_inv[[i]]
+            
+            bi %*% t(bi) + D_hat - D_hat %*% t(Zi) %*% Vi_inv %*% Zi %*% D_hat
+        })
+        D_hat <- Reduce("+", D_hat) / N
+        
+        # Stop criterion (Generalized log-likelihood)
+        aux_GLL <- lapply(1:N, function(i){
+            Yi <- Ys[[i]]
+            f_hat <- f_y_hat[[i]]
+            
+            Zi <- Zis[[i]]
+            ni <- nrow(Zi)
+            
+            bi <- bi_hat[[i]]
+            Vi_inv <- Vi_hat_inv[[i]]
+            
+            G <- Yi - f_hat - Zi%*%bi
+            
+            t(G) %*% G / sigma2_hat + t(bi) %*% solve(D_hat) %*% bi + log(det(D_hat)) + ni*log(sigma2_hat)
+        }) %>% unlist %>% sum
+
+        if(abs(aux_GLL - GLLs[length(GLLs)]) <= e | r >= max_iter){
+            converged <- TRUE
+        }else{
+            GLLs[r+1] <- aux_GLL
+        }            
+    }
+    
+    if(verbose){
+        cat("Converged after", r, "iterations. Difference in GLLs of", abs(GLLs[length(GLLs)] - GLLs[length(GLLs)-1]))
+    }
+    
+    ids <- unique(df$id)
+    names(bi_hat) <- ids
+    
+    return(list(
+        "f" = fit_rpart,
+        "bi" = bi_hat,
+        "sigma2" = sigma2_hat,
+        "D" = D_hat,
+        "r" = r,
+        "GLL" = GLLs[-1]
+    ))
+}
+
+predict_MERF <- function(fit, Xis, Zis, ids = NULL){
+    
+    predict_single <- function(fit, Xi, Zi, id){
+        Xi <- as.data.frame(Xi)
+        Zi <- as.data.frame(Zi)
+        
+        fixed_part <- predict(fit$f, Xi)$predictions
         
         # If the subject id is not given, assume its a new individual, returning just the population mean
         if(is.null(id) | !(id %in% names(fit$bi))){
