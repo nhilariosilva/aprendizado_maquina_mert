@@ -127,7 +127,7 @@ generate_sample <- function(N, Xi, beta, Zi, D, sigma2){
     ))
 }
 
-train_MERT <- function(df, fixed_effects_form, Ys, Xis, Zis, e, response_name, verbose = TRUE, max_iter = 200){    
+train_MERT <- function(df, fixed_effects_form, Ys, Xis, Zis, e, verbose = TRUE, max_iter = 200){    
     N <- length(Xis)
     count <- 0
     q <- ncol(Zis[[1]])
@@ -246,15 +246,17 @@ train_MERT <- function(df, fixed_effects_form, Ys, Xis, Zis, e, response_name, v
             t(G) %*% G / sigma2_hat + t(bi) %*% solve(D_hat) %*% bi + log(det(D_hat)) + ni*log(sigma2_hat)
         }) %>% unlist %>% sum
 
-        if(abs(aux_GLL - GLLs[length(GLLs)]) <= e | r >= max_iter){
+        if(abs(aux_GLL - GLLs[length(GLLs)]) <= e){
+            converged <- TRUE
+        }else if(r >= max_iter){
             converged <- TRUE
         }else{
             GLLs[r+1] <- aux_GLL
-        }            
+        }
     }
     
     if(verbose){
-        cat("Converged after", r, "iterations. Difference in GLLs of", abs(GLLs[length(GLLs)] - GLLs[length(GLLs)-1]))
+        cat("Converged after", r, "iterations. Difference in GLLs of", abs(aux_GLL - GLLs[length(GLLs)]))
     }
     
     ids <- unique(df$id)
@@ -304,7 +306,7 @@ predict_MERT <- function(fit, Xis, Zis, ids = NULL){
     }
 }
 
-train_MERF <- function(df, fixed_effects_form, Ys, Xis, Zis, e, response_name, verbose = TRUE, max_iter = 200){    
+train_MERF <- function(df, fixed_effects_form, Ys, Xis, Zis, e, verbose = TRUE, max_iter = 200){    
     N <- length(Xis)
     count <- 0
     q <- ncol(Zis[[1]])
@@ -423,15 +425,17 @@ train_MERF <- function(df, fixed_effects_form, Ys, Xis, Zis, e, response_name, v
             t(G) %*% G / sigma2_hat + t(bi) %*% solve(D_hat) %*% bi + log(det(D_hat)) + ni*log(sigma2_hat)
         }) %>% unlist %>% sum
 
-        if(abs(aux_GLL - GLLs[length(GLLs)]) <= e | r >= max_iter){
+        if(abs(aux_GLL - GLLs[length(GLLs)]) <= e){
+            converged <- TRUE
+        }else if(r >= max_iter){
             converged <- TRUE
         }else{
             GLLs[r+1] <- aux_GLL
-        }            
+        }      
     }
     
     if(verbose){
-        cat("Converged after", r, "iterations. Difference in GLLs of", abs(GLLs[length(GLLs)] - GLLs[length(GLLs)-1]))
+        cat("Converged after", r, "iterations. Difference in GLLs of", abs(aux_GLL - GLLs[length(GLLs)]))
     }
     
     ids <- unique(df$id)
